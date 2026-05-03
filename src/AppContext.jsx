@@ -384,4 +384,37 @@ export function AppProvider({ children }) {
     const d = getUD();
     if (patch.orders   !== undefined) patch.orders.forEach(o => { if (!d.orders.find(x => x.id === o.id)) addOrder(o); });
     if (patch.products !== undefined) patch.products.forEach(p => { if (!d.products.find(x => x.id === p.id)) addProduct(p); });
-    if (patch.costs    !== unde
+    if (patch.costs    !== undefined) patch.costs.forEach(c => { if (!d.costs.find(x => x.id === c.id)) addCost(c); });
+    if (patch.tickets  !== undefined) patch.tickets.forEach(t => { if (!d.tickets.find(x => x.id === t.id)) addTicket(t); });
+    if (patch.revenues !== undefined) patch.revenues.forEach(r => { if (!d.revenues.find(x => x._id === r._id)) addRevenue(r.amount, r.date); });
+    if (patch.goals    !== undefined && patch.goals) setGoal(patch.goals.revenueTarget, patch.goals.month);
+  }
+
+  return (
+    <Ctx.Provider value={{
+      profile, allProfiles, impersonating,
+      activeUser: activeProfile, activeProfile, activeId,
+      isAdmin, isPro, loading,
+      getUD, patchUD, refreshUD,
+      addOrder, deleteOrder, updateOrderStatus,
+      addProduct, deleteProduct, updateProductStock,
+      addRevenue, deleteRevenue,
+      addCost, deleteCost,
+      addTicket, updateTicketStatus, deleteTicket,
+      setGoal,
+      loadAllProfiles, adminTogglePlan, adminToggleBlock, adminDeleteUser,
+      startImpersonate, stopImpersonate,
+      page, setPage, modal, setModal, toast, showToast,
+      login, register, logout, changePassword, doUpgrade,
+      pendingEmail, setPendingEmail, verifyOtp, resendOtp,
+      users: allProfiles,
+      currentUser: profile,
+      userData: {},
+      togglePlan: adminTogglePlan,
+      toggleBlock: adminToggleBlock,
+      deleteUser: adminDeleteUser,
+    }}>
+      {children}
+    </Ctx.Provider>
+  );
+}
