@@ -5,10 +5,6 @@ import { today } from './storage.js';
 export const Ctx = createContext(null);
 export const useApp = () => useContext(Ctx);
 
-// ✅ CORRIGÉ : L'email admin n'est plus hardcodé côté client.
-// La vérification is_admin se fait uniquement via profile.is_admin
-// qui vient de la base de données (RLS + trigger SQL).
-
 function empty() {
   return { orders: [], products: [], revenues: [], costs: [], tickets: [], goals: null };
 }
@@ -27,9 +23,6 @@ export function AppProvider({ children }) {
 
   const activeProfile = impersonating || profile;
   const activeId      = activeProfile?.id ?? null;
-  // ✅ CORRIGÉ : isAdmin vient uniquement de la BDD (profile.is_admin)
-  // Un utilisateur ne peut pas falsifier cette valeur côté client
-  // car Supabase RLS rejette les requêtes non autorisées au niveau DB.
   const isAdmin = profile?.is_admin === true && !impersonating;
   const isPro   = useCallback(
     () => (impersonating?.plan ?? profile?.plan) === 'pro',
@@ -74,10 +67,6 @@ export function AppProvider({ children }) {
       return;
     }
 
-    // Le profil n'existe pas encore — le trigger SQL peut avoir échoué.
-    // On tente de le créer manuellement.
-    // ✅ CORRIGÉ : is_admin et plan sont déterminés par le trigger SQL côté serveur.
-    // Ici on crée juste un profil de base (free, non admin).
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
       const name = user.user_metadata?.name
@@ -89,7 +78,6 @@ export function AppProvider({ children }) {
         id: uid,
         name,
         email: user.email,
-        // plan et is_admin sont définis par le trigger SQL, pas ici
         plan: 'free',
         is_admin: false,
         status: 'active',
@@ -146,13 +134,11 @@ export function AppProvider({ children }) {
       product: o.product || null, stage: o.stage || 'Prospect',
       status: o.status || 'En cours', date: o.date || today(),
     });
-    // ✅ CORRIGÉ : Erreur Supabase capturée et remontée
     if (error) { showToast('Erreur : ' + error.message, 'err'); return false; }
     await refreshUD(); showToast('Commande ajoutée', 'ok'); return true;
   }
 
   async function deleteOrder(id) {
-    // ✅ CORRIGÉ : Erreur capturée sur les deletes
     const { error } = await supabase.from('orders').delete().eq('id', id);
     if (error) { showToast('Erreur suppression : ' + error.message, 'err'); return; }
     await refreshUD(); showToast('Commande supprimée', 'ok');
@@ -261,15 +247,24 @@ export function AppProvider({ children }) {
     const e = email.trim().toLowerCase();
     if (!firstName || !lastName || !e || !password) { showToast('Tous les champs sont requis', 'err'); return false; }
     if (password.length < 8) { showToast('Mot de passe trop court (8 min)', 'err'); return false; }
-    const { error } = await supabase.auth.signUp({
+
+    const { data, error } = await supabase.auth.signUp({
       email: e, password,
       options: { data: { name: `${firstName.trim()} ${lastName.trim()}` } },
     });
+
     if (error) {
-      if (error.message.toLowerCase().includes('already')) showToast('Cet email est déjà utilisé', 'err');
-      else showToast(error.message, 'err');
+      // Affiche l'erreur exacte de Supabase pour diagnostiquer
+      showToast(error.message, 'err');
       return false;
     }
+
+    // Supabase retourne un user avec identities vide si l'email est déjà pris
+    if (data?.user && data.user.identities?.length === 0) {
+      showToast('Cet email est déjà utilisé', 'err');
+      return false;
+    }
+
     setPendingEmail(e);
     showToast('Code envoyé ! Vérifiez votre email.', 'ok');
     return true;
@@ -319,14 +314,14 @@ export function AppProvider({ children }) {
   }
 
   async function loadAllProfiles() {
-    if (!profile?.is_admin) return; // ✅ Guard supplémentaire
+    if (!profile?.is_admin) return;
     const { data, error } = await supabase.from('profiles').select('*').order('created_at', { ascending: false });
     if (error) { showToast('Erreur chargement utilisateurs', 'err'); return; }
     setAllProfiles(data || []);
   }
 
   async function adminTogglePlan(uid) {
-    if (!isAdmin) { showToast('Action non autorisée', 'err'); return; } // ✅ Guard
+    if (!isAdmin) { showToast('Action non autorisée', 'err'); return; }
     const u = allProfiles.find(x => x.id === uid);
     if (!u) return;
     const { error } = await supabase.from('profiles').update({ plan: u.plan === 'pro' ? 'free' : 'pro' }).eq('id', uid);
@@ -335,7 +330,7 @@ export function AppProvider({ children }) {
   }
 
   async function adminToggleBlock(uid) {
-    if (!isAdmin) { showToast('Action non autorisée', 'err'); return; } // ✅ Guard
+    if (!isAdmin) { showToast('Action non autorisée', 'err'); return; }
     const u = allProfiles.find(x => x.id === uid);
     if (!u || u.is_admin) return;
     const ns = u.status === 'active' ? 'blocked' : 'active';
@@ -344,19 +339,15 @@ export function AppProvider({ children }) {
     await loadAllProfiles(); showToast(`Compte ${ns === 'active' ? 'débloqué' : 'bloqué'}`, 'ok');
   }
 
-  // ✅ CORRIGÉ : adminDeleteUser appelle maintenant une Edge Function Supabase
-  // qui utilise la clé service_role pour supprimer le compte auth.users.
-  // Sans ça, l'utilisateur pouvait se reconnecter après suppression.
   async function adminDeleteUser(uid) {
-    if (!isAdmin) { showToast('Action non autorisée', 'err'); return; } // ✅ Guard
+    if (!isAdmin) { showToast('Action non autorisée', 'err'); return; }
     const { error } = await supabase.functions.invoke('delete-user', {
       body: { userId: uid },
     });
     if (error) {
-      // Fallback : au moins supprimer le profil si l'Edge Function n'est pas déployée
       const { error: profileErr } = await supabase.from('profiles').delete().eq('id', uid);
       if (profileErr) { showToast('Erreur suppression : ' + profileErr.message, 'err'); return; }
-      showToast('Profil supprimé (compte auth non supprimé — déployez l\'Edge Function delete-user)', 'ok');
+      showToast('Profil supprimé (déployez l\'Edge Function delete-user pour suppression complète)', 'ok');
     } else {
       showToast('Utilisateur supprimé définitivement', 'ok');
     }
@@ -364,7 +355,7 @@ export function AppProvider({ children }) {
   }
 
   function startImpersonate(u) {
-    if (!isAdmin) { showToast('Action impossible', 'err'); return; } // ✅ Guard
+    if (!isAdmin) { showToast('Action impossible', 'err'); return; }
     if (u.is_admin) { showToast('Action impossible', 'err'); return; }
     setImpersonating(u); setPage('operations');
     invalidate(u.id);
@@ -373,8 +364,6 @@ export function AppProvider({ children }) {
 
   function stopImpersonate() { setImpersonating(null); setPage('admin'); }
 
-  // ✅ Les liens FedaPay sont lus depuis les variables d'environnement
-  // (ou gardés en placeholder si pas encore configurés)
   const FEDAPAY_MONTHLY_LINK = import.meta.env.VITE_FEDAPAY_MONTHLY_LINK || 'https://me.fedapay.com/operamind-pro-mensuel';
   const FEDAPAY_ANNUAL_LINK  = import.meta.env.VITE_FEDAPAY_ANNUAL_LINK  || 'https://me.fedapay.com/operamind-pro-annuel';
 
@@ -390,45 +379,9 @@ export function AppProvider({ children }) {
     toastRef.current = setTimeout(() => setToast(null), 3500);
   }
 
-  // ✅ CORRIGÉ : patchUD simplifié — retire la logique de déduplication fragile
-  // Les composants doivent appeler directement addOrder, addProduct, etc.
   function patchUD(patch) {
     if (!activeId) return;
     const d = getUD();
     if (patch.orders   !== undefined) patch.orders.forEach(o => { if (!d.orders.find(x => x.id === o.id)) addOrder(o); });
     if (patch.products !== undefined) patch.products.forEach(p => { if (!d.products.find(x => x.id === p.id)) addProduct(p); });
-    if (patch.costs    !== undefined) patch.costs.forEach(c => { if (!d.costs.find(x => x.id === c.id)) addCost(c); });
-    if (patch.tickets  !== undefined) patch.tickets.forEach(t => { if (!d.tickets.find(x => x.id === t.id)) addTicket(t); });
-    if (patch.revenues !== undefined) patch.revenues.forEach(r => { if (!d.revenues.find(x => x._id === r._id)) addRevenue(r.amount, r.date); });
-    if (patch.goals    !== undefined && patch.goals) setGoal(patch.goals.revenueTarget, patch.goals.month);
-  }
-
-  return (
-    <Ctx.Provider value={{
-      profile, allProfiles, impersonating,
-      activeUser: activeProfile, activeProfile, activeId,
-      isAdmin, isPro, loading,
-      getUD, patchUD, refreshUD,
-      addOrder, deleteOrder, updateOrderStatus,
-      addProduct, deleteProduct, updateProductStock,
-      addRevenue, deleteRevenue,
-      addCost, deleteCost,
-      addTicket, updateTicketStatus, deleteTicket,
-      setGoal,
-      loadAllProfiles, adminTogglePlan, adminToggleBlock, adminDeleteUser,
-      startImpersonate, stopImpersonate,
-      page, setPage, modal, setModal, toast, showToast,
-      login, register, logout, changePassword, doUpgrade,
-      pendingEmail, setPendingEmail, verifyOtp, resendOtp,
-      // Compat shims pour PageAdmin
-      users: allProfiles,
-      currentUser: profile,
-      userData: {},
-      togglePlan: adminTogglePlan,
-      toggleBlock: adminToggleBlock,
-      deleteUser: adminDeleteUser,
-    }}>
-      {children}
-    </Ctx.Provider>
-  );
-}
+    if (patch.costs    !== unde
